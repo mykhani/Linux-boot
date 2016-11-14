@@ -1,0 +1,115 @@
+Code flow of u-boot SPL
+=======================
+
+arch/arm/cpu/armv7/start.S (Entry point for u-boot spl)
+	reset vector
+	* set cpu in SVC mode
+	* Disable FIQ and IRQ
+	* Set Vector table address (CP15 register, start of SRAM)
+	* Initialize MMU, cache, TLB (invalidate TLB, ICACHE)
+	* call _main in arch/arm/lib/crt0.S
+
+arch/arm/lib/crt0.S (setup C runtime environment)
+	_main
+	* setup stack pointer
+	* allocate space for GD (global data structure) and malloc pool just above stack pointer
+	* call board_init_f in arch/arm/cpu/armv7/am33xx/board.c
+
+arch/arm/cpu/armv7/am33xx/board.c
+	board_init_f
+	* Power Reset and Clock Manager PRCM init (setup clocks, core voltage (OPP) and timer)
+	* Initialize SDRAM
+	* Use DRAM stack for the rest of SPL if requested (CONFIG_SPL_STACK_R=y and 
+	CONFIG_SPL_STACK_R_ADDR=0x82000000. Sometimes we want to use SDRAM
+	for the main board_init_r() execution. This is typically because we need
+	more stack space for things like the MMC sub-system. call spl_relocate_stack_gd
+	in common/spl/spl.c
+
+common/spl/spl.c
+	spl_relocate_stack_gd
+	* Create a new GD structure at CONFIG_SPL_STACK_R_ADDR and copy over the old
+	gd to this new gd structure. Store the new stack pointer to sp and r9
+	* zeroize the bss section that was located in SDRAM using linker script
+	* For SPL, CONFIG_SYS_THUMB_BUILD is enabled. Call board_init_r
+
+common/spl/spl.c
+	board_init_r
+	* setup malloc pool if configured (sets malloc pool start and end addresses)
+	* for first run of spl code, call spl_init
+
+	spl_init (common/spl/spl.c)
+	* calls fdtdec_setup in lib/fdtdec.c. There it finds the location of fdt blob
+	which is gd->fdt_blob = (ulong *)&_end; where &_end refers to address of 
+	section .__end. See arch/arm/lib/sections.c for more
+	details regarding section addressing. It further calls fdtdec_prepare_fdt
+	which verifies the integrity of dtb blob. 
+	
+	* call timer_init (already called in board_init_f)
+	* calls spl_board_init in arch/arm/cpu/armv7/omap-common/boot-common.c
+
+arch/arm/cpu/armv7/omap-common/boot-common.c
+	spl_board_init
+	* save_omap_boot_params - save the boot parameters passed in from ROM code
+	to GD data structure. It contains settings for boot device and boot mode
+	* preloader_console_init - configure the UART for console. calls serial_init
+	* serial_init reads paramters from device-tree blob just like linux
+	* initialize i2c by calling i2c_init
+	* call arch_misc_init (arch/arm/cpu/armv7/am33xx/board.c) - initializes 2 USB OTG
+	controller on am33xx SOC into USB Host and USB device modes respectively.
+	* call hw_watchdog_init (initialize watchdog timer, driver drivers/watchdog/omap_wdt.c)
+	* jump to am33xx_spl_board_init - Increase MPU (Microprocessor unit) frequency
+	* return to board_init_r
+
+common/spl/spl.c
+	board_init_r
+	* board_boot_order - initiliazes boot devices list from the boot device passed
+	in from ROM code and saved in save_omap_boot_params call above
+	* Iterates over boot devices from boot devices list initialized in the above step
+	and tries to load the image by calling spl_load_image.
+	* spl_load_image further calls boot device specific functions. For MMC boot, it
+	calls spl_mmc_load_image defined in common/spl/spl_mmc.c.
+
+common/spl/spl_mmc.c
+	spl_mmc_load_image 
+	* calls spl_mmc_find_device
+		* further calls spl_mmc_get_device_index to check if boot device passed 
+		in by ROM code is valid mmc device
+		* spl_mmc_find_device then calls mmc_initialize from drivers/mmc/mmc.c
+
+drivers/mmc/mmc.c
+	mmc_initialize
+	* Initializes linked-list of mmc devices
+	* calls mmc_probe which further calls board_mmc_init
+	* board_mmc_init maps to board_mmc_init from omap-common/boot-common.c
+
+omap-common/boot-common.c
+	board_mmc_init
+	* calls omap_mmc_init from drivers/mmc/omap_hsmmc.c. omap_mmc_init reads the MMC register
+	info from arch/arm/include/asm/arch-am33xx/mmc_host_def.h, populates platform specific
+	MMC data structure and calls mmc_create() in drivers/mmc/mmc_legacy.c. mmc_create 
+	creates a mmc device () based on platform specific data passed in previous step and 
+	add mmc device to linked-list of mmc devices.
+	* returns to mmc_initialize which returns to spl_mmc_find_device in common/spl/spl_mmc.c.
+
+common/spl/spl_mmc.c
+	spl_mmc_find_device
+	* after mmc_initialize is succesful, find_mmc_device is called to verify that mmc
+	device has been added to linked-list of mmc device.
+	* It returns to spl_mmc_load_image.
+
+common/spl/spl_mmc.c
+	spl_mmc_load_image
+	* calls mmc_init() 
+	* calls spl_boot_mode (in arch/arm/cpu/armv7/omap-common/boot-common.c) to determine boot mode. It
+	is set by ROM code and stored in GD data structure. In case of BBB, it is MMCSD_MODE_FS i.e.
+	SD card boot with filesystem support. So spl_mmc_do_fs_boot() is further called.
+	* spl_mmc_do_fs_boot() calls spl_load_image_fat (common/spl/spl_fat.c) to load u-boot.img from FAT filesystem
+	at spl_image.load_addr. It also sets spl_image.os value by calling spl_parse_image_header.
+	* returns to board_init_r
+
+common/spl/spl.c
+	board_init_r
+	* calls spl_board_prepare_for_boot (does nothing)
+	* calls jump_to_image_no_args (arch/arm/cpu/armv7/omap-common/boot-common.c)
+	It calls spl_image.entry_point by converting it to a function pointer of type
+	image_entry_arg_t defined in common/spl/spl.c 
