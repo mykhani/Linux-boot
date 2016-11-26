@@ -12,3 +12,24 @@ Linux and dtb have been loaded into RAM.
 5) Set r2 to memory address of dtb
 6) Set r3 to 0
 7) Jump to Linux kernel entry point
+
+Startup Sequence
+================
+arch/arm/kernel/head.S (Entry point for kernel)
+	Startup
+	* verify that processor is supported. Uses __proc_info structures, populated by linker, containing
+	processor specific information. See arch/arm/include/asm/procinfo.h for structure declaration. Note
+	that procinfo structure is defined in assembly using appropriate processor file arch/arm/mm/proc-*.S.
+	* Create page tables
+	* call CPU specific code (from arch/arm/mm/proc-*.S)
+	* enable MMU
+	* call __mmap_switched
+
+arch/arm/kernel/head-common.S
+	__mmap_switched
+	* after doing some work, call start_kernel. start_kernel is the main startring point of Linux kernel
+	written in C.
+
+init/main.c
+	start_kernel
+	*
